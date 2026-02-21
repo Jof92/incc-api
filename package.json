@@ -1,7 +1,7 @@
 {
   "name": "incc-api",
-  "version": "1.0.0",
-  "description": "API para buscar o INCC-DI (FGV) atualizado do Sinduscon-PR",
+  "version": "2.0.0",
+  "description": "API para buscar o INCC-DI (FGV) atualizado do Sinduscon-PR — histórico completo",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -12,7 +12,8 @@
     "cheerio": "^1.0.0",
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "node-cache": "^5.1.2"
+    "node-cache": "^5.1.2",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.3"
