@@ -3,7 +3,6 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const NodeCache = require('node-cache');
 const cors = require('cors');
-const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const cache = new NodeCache({ stdTTL: 3600 * 6 });
@@ -19,15 +18,31 @@ const MESES_PT = [
   'Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'
 ];
 
-// ─── Cria um cliente Supabase novo a cada chamada (evita ECONNRESET) ──────────
-function getSupabase() {
-  return createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY,
-    {
-      auth: { persistSession: false },
-    }
-  );
+// ─── Supabase via REST (axios direto, sem SDK) ────────────────────────────────
+// Isso evita ECONNRESET causado pela distância Oregon <-> São Paulo
+function supabaseGet(table, params = '') {
+  const url = `${process.env.SUPABASE_URL}/rest/v1/${table}${params}`;
+  return axios.get(url, {
+    timeout: 15000,
+    headers: {
+      'apikey': process.env.SUPABASE_SERVICE_KEY,
+      'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json',
+    },
+  });
+}
+
+function supabasePost(table, body) {
+  const url = `${process.env.SUPABASE_URL}/rest/v1/${table}`;
+  return axios.post(url, body, {
+    timeout: 15000,
+    headers: {
+      'apikey': process.env.SUPABASE_SERVICE_KEY,
+      'Authorization': `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=minimal',
+    },
+  });
 }
 
 function parseBR(val) {
@@ -74,23 +89,25 @@ async function sincronizarNovosIndices() {
   console.log('[Sync] Verificando novos índices...');
 
   const pageRows = await fetchRecentFromPage();
-  if (!pageRows.length) return;
+  if (!pageRows.length) {
+    console.log('[Sync] Nenhuma linha encontrada no scraping.');
+    return;
+  }
 
   for (const row of pageRows) {
-    const { data: existing } = await getSupabase()
-      .from('incc_historico')
-      .select('id')
-      .eq('data_referencia', row.data_referencia)
-      .single();
+    try {
+      const { data: existing } = await supabaseGet(
+        'incc_historico',
+        `?data_referencia=eq.${row.data_referencia}&select=id&limit=1`
+      );
 
-    if (!existing) {
-      const { error } = await getSupabase().from('incc_historico').insert(row);
-      if (error) {
-        console.error(`[Sync] Erro ao inserir ${row.mes}:`, error.message);
-      } else {
+      if (!existing || existing.length === 0) {
+        await supabasePost('incc_historico', row);
         console.log(`[Sync] ✅ Novo índice inserido: ${row.mes}`);
         cache.flushAll();
       }
+    } catch (err) {
+      console.error(`[Sync] Erro ao processar ${row.mes}:`, err.message);
     }
   }
 
@@ -105,16 +122,15 @@ async function fetchINCC() {
     return cached;
   }
 
-  console.log('[Supabase] Buscando histórico...');
+  console.log('[Supabase] Buscando histórico via REST...');
 
-  const { data, error } = await getSupabase()
-    .from('incc_historico')
-    .select('*')
-    .order('data_referencia', { ascending: true });
+  const { data } = await supabaseGet(
+    'incc_historico',
+    '?select=*&order=data_referencia.asc'
+  );
 
-  console.log('[Supabase] registros:', data?.length, '| erro:', error?.message ?? 'nenhum');
+  console.log('[Supabase] registros recebidos:', data?.length ?? 0);
 
-  if (error) throw new Error('Erro ao buscar dados do Supabase: ' + error.message);
   if (!data || data.length === 0) throw new Error('Nenhum dado encontrado no Supabase.');
 
   const historico = data.map(row => ({
@@ -146,21 +162,30 @@ async function fetchINCC() {
 
 app.get('/incc', async (req, res) => {
   try { res.json({ success: true, data: await fetchINCC() }); }
-  catch (err) { res.status(500).json({ success: false, error: err.message }); }
+  catch (err) {
+    console.error('[/incc] Erro:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get('/incc/ultimo', async (req, res) => {
   try {
     const data = await fetchINCC();
     res.json({ success: true, data: data.ultimo, atualizado_em: data.atualizado_em, fonte: data.fonte });
-  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+  } catch (err) {
+    console.error('[/incc/ultimo] Erro:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get('/incc/historico', async (req, res) => {
   try {
     const data = await fetchINCC();
     res.json({ success: true, total: data.total_registros, fonte: data.fonte, historico: data.historico });
-  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+  } catch (err) {
+    console.error('[/incc/historico] Erro:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.get('/incc/mes/:mes/:ano', async (req, res) => {
@@ -170,15 +195,20 @@ app.get('/incc/mes/:mes/:ano', async (req, res) => {
     const encontrado = data.historico.find(r => r.mes.toLowerCase() === `${mes}/${ano}`.toLowerCase());
     if (!encontrado) return res.status(404).json({ success: false, error: `Mês "${mes}/${ano}" não encontrado` });
     res.json({ success: true, data: encontrado, fonte: data.fonte });
-  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+  } catch (err) {
+    console.error('[/incc/mes] Erro:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
-// Sincronização manual
 app.post('/incc/sync', async (req, res) => {
   try {
     await sincronizarNovosIndices();
     res.json({ success: true, message: 'Sincronização concluída.' });
-  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+  } catch (err) {
+    console.error('[/incc/sync] Erro:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 app.post('/incc/cache/clear', (req, res) => {
@@ -207,11 +237,6 @@ function agendarSincronizacaoDiaria() {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ API INCC rodando em http://localhost:${PORT}`);
-  console.log(`   GET  /incc              → histórico completo`);
-  console.log(`   GET  /incc/ultimo       → último índice`);
-  console.log(`   GET  /incc/historico    → array histórico`);
-  console.log(`   GET  /incc/mes/:mes/:ano`);
-  console.log(`   POST /incc/sync         → sincroniza novos índices`);
-  console.log(`   POST /incc/cache/clear`);
+  console.log(`   Conectando ao Supabase via REST (sem SDK) — elimina ECONNRESET`);
   agendarSincronizacaoDiaria();
 });
