@@ -19,11 +19,16 @@ const MESES_PT = [
   'Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'
 ];
 
-// Supabase client
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
+// ─── Cria um cliente Supabase novo a cada chamada (evita ECONNRESET) ──────────
+function getSupabase() {
+  return createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY,
+    {
+      auth: { persistSession: false },
+    }
+  );
+}
 
 function parseBR(val) {
   if (val === undefined || val === null || val === '') return null;
@@ -72,19 +77,19 @@ async function sincronizarNovosIndices() {
   if (!pageRows.length) return;
 
   for (const row of pageRows) {
-    const { data: existing } = await supabase
+    const { data: existing } = await getSupabase()
       .from('incc_historico')
       .select('id')
       .eq('data_referencia', row.data_referencia)
       .single();
 
     if (!existing) {
-      const { error } = await supabase.from('incc_historico').insert(row);
+      const { error } = await getSupabase().from('incc_historico').insert(row);
       if (error) {
         console.error(`[Sync] Erro ao inserir ${row.mes}:`, error.message);
       } else {
         console.log(`[Sync] ✅ Novo índice inserido: ${row.mes}`);
-        cache.flushAll(); // invalida cache pois há dado novo
+        cache.flushAll();
       }
     }
   }
@@ -100,10 +105,14 @@ async function fetchINCC() {
     return cached;
   }
 
-  const { data, error } = await supabase
+  console.log('[Supabase] Buscando histórico...');
+
+  const { data, error } = await getSupabase()
     .from('incc_historico')
     .select('*')
     .order('data_referencia', { ascending: true });
+
+  console.log('[Supabase] registros:', data?.length, '| erro:', error?.message ?? 'nenhum');
 
   if (error) throw new Error('Erro ao buscar dados do Supabase: ' + error.message);
   if (!data || data.length === 0) throw new Error('Nenhum dado encontrado no Supabase.');
